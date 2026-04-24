@@ -15,11 +15,22 @@ async function searchTMDB(query) {
   return (data.results || []).filter(r => r.media_type !== "person").slice(0, 9);
 }
 
-// UV's default XOR codec
-function xorEncode(str) {
-  return encodeURIComponent(
-    Array.from(str).map(c => String.fromCharCode(c.charCodeAt(0) ^ 2)).join("")
-  );
+// Fetch a URL through the bare server and return response text
+async function fetchViaBare(targetUrl) {
+  // Bare server v2 protocol: POST to bare server with target URL in headers
+  const res = await fetch(BARE_SERVER, {
+    method: "POST",
+    headers: {
+      "x-bare-url":     targetUrl,
+      "x-bare-headers": JSON.stringify({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+      }),
+      "x-bare-forward-headers": JSON.stringify(["accept-encoding", "connection"]),
+    },
+  });
+  return res.text();
 }
 
 async function start() {
@@ -59,83 +70,48 @@ async function start() {
     cinemaUrl = `https://cinemaos.tech/player/${r.id}/${season}/${episode}`;
   }
 
-  // Open the window synchronously right here so the browser doesn't block it
+  // Open about:blank synchronously before any await
   const win = window.open("about:blank", "_blank");
-  if (!win) { alert("Please allow popups for this site and try again."); return; }
+  if (!win) { alert("Please allow popups and try again."); return; }
 
-  // The proxied URL: UV encodes cinemaUrl, bare server handls the tunneling
-  const proxiedUrl = "/uv/service/" + xorEncode(cinemaUrl);
-
-  const html = `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8"/>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
-  iframe { width: 100%; height: 100%; border: none; display: block; }
-  #msg { position: fixed; inset: 0; background: #0a0a0a; color: #555;
-         font-family: monospace; font-size: 13px;
-         display: flex; align-items: center; justify-content: center; }
-</style>
-</head>
-<body>
-<div id="msg">loading...</div>
-<iframe id="frame" allowfullscreen allow="autoplay; fullscreen; encrypted-media; picture-in-picture"></iframe>
-<script>
-(async () => {
-  const BARE       = ${JSON.stringify(BARE_SERVER)};
-  const CINEMA_URL = ${JSON.stringify(cinemaUrl)};
-  const PROXIED    = ${JSON.stringify(proxiedUrl)};
-
-  function xorEncode(str) {
-    return encodeURIComponent(
-      Array.from(str).map(c => String.fromCharCode(c.charCodeAt(0) ^ 2)).join("")
-    );
-  }
-
-  // Fetch UV SW from CDN, patch in config, register as blob SW
-  async function setupUV() {
-    const swText = await fetch(
-      "https://cdn.jsdelivr.net/npm/@titaniumnetwork-dev/ultraviolet@2.2.4/dist/uv.sw.js"
-    ).then(r => r.text());
-
-    const config = \`
-self.__uv$config = {
-  prefix:    "/uv/service/",
-  bare:      "\${BARE}",
-  encodeUrl: (s) => encodeURIComponent(Array.from(s).map(c => String.fromCharCode(c.charCodeAt(0)^2)).join("")),
-  decodeUrl: (s) => decodeURIComponent(Array.from(s).map(c => String.fromCharCode(c.charCodeAt(0)^2)).join("")),
-  handler:   "https://cdn.jsdelivr.net/npm/@titaniumnetwork-dev/ultraviolet@2.2.4/dist/uv.handler.js",
-  bundle:    "https://cdn.jsdelivr.net/npm/@titaniumnetwork-dev/ultraviolet@2.2.4/dist/uv.bundle.js",
-};
-\`;
-
-    const blob  = new Blob([config + swText], { type: "application/javascript" });
-    const swUrl = URL.createObjectURL(blob);
-    await navigator.serviceWorker.register(swUrl, { scope: "/" });
-    await navigator.serviceWorker.ready;
-  }
-
-  try {
-    await setupUV();
-    const frame = document.getElementById("frame");
-    document.getElementById("msg").remove();
-    frame.src = PROXIED;
-  } catch (err) {
-    console.error("Proxy failed:", err);
-    // Fallback: just navigate the tab directly to CinemaOS
-    document.getElementById("msg").textContent = "opening directly...";
-    setTimeout(() => { window.location.href = CINEMA_URL; }, 500);
-  }
-})();
-<\/script>
-</body>
-</html>`;
-
+  // Write a loading screen immediately so the window stays open
   win.document.open();
-  win.document.write(html);
+  win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"/>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;background:#0a0a0a;overflow:hidden}
+  #msg{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+       color:#444;font-family:monospace;font-size:13px}
+</style></head><body><div id="msg">loading...</div></body></html>`);
   win.document.close();
+
+  // Now fetch CinemaOS through bare server and write the result into the window
+  try {
+    const html = await fetchViaBare(cinemaUrl);
+
+    // Rewrite relative URLs to absolute so assets load correctly
+    const rewritten = html
+      .replace(/(href|src)=["']\//g, `$1="https://cinemaos.tech/`)
+      .replace(/url\(\//g, `url(https://cinemaos.tech/`);
+
+    win.document.open();
+    win.document.write(rewritten);
+    win.document.close();
+
+    // Set base URL so relative links inside the page resolve correctly
+    const base = win.document.createElement("base");
+    base.href = "https://cinemaos.tech";
+    win.document.head.prepend(base);
+
+  } catch (err) {
+    console.error("Bare fetch failed:", err);
+    win.document.open();
+    win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"/>
+<style>*{margin:0;padding:0}html,body{background:#0a0a0a;color:#555;font-family:monospace;
+display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:8px}</style>
+</head><body><div>proxy error</div><div style="font-size:11px;color:#333">${err.message}</div></body></html>`);
+    win.document.close();
+  }
 }
 
 window.addEventListener("load", start);
