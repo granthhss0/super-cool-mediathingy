@@ -7,7 +7,7 @@
 <body>
 <script>
 const TMDB_API_KEY = "2d1351cf74f73892042699d0431b799a";
-const BARE_SERVER  = "https://bare-server.fly.dev"; // no trailing slash
+const BARE_SERVER  = "https://bare-server.fly.dev";
 
 async function searchTMDB(query) {
   const res  = await fetch(`https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(query)}&include_adult=false`);
@@ -15,26 +15,32 @@ async function searchTMDB(query) {
   return (data.results || []).filter(r => r.media_type !== "person").slice(0, 9);
 }
 
-// Fetch a URL through bare server v2 endpoint
 async function fetchViaBare(targetUrl) {
-  const url = new URL(targetUrl);
+  const url  = new URL(targetUrl);
+  const port = url.port || (url.protocol === "https:" ? "443" : "80");
 
-  const res = await fetch(`${BARE_SERVER}/v2/`, {
+  // Bare v1 protocol — URL split into individual headers
+  const res = await fetch(`${BARE_SERVER}/v1/`, {
     method: "GET",
     headers: {
-      "x-bare-url":              targetUrl,
-      "x-bare-headers":          JSON.stringify({
-        "Host":            url.host,
-        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
+      "x-bare-protocol": url.protocol,           // "https:"
+      "x-bare-host":     url.hostname,           // "cinemaos.tech"
+      "x-bare-port":     port,                   // "443"
+      "x-bare-path":     url.pathname + url.search, // "/player/12345"
+      "x-bare-headers":  JSON.stringify({
+        "Host":       url.hostname,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept":     "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
       }),
-      "x-bare-forward-headers":  JSON.stringify(["accept-encoding", "connection"]),
-      "x-bare-pass-headers":     JSON.stringify(["content-encoding", "content-length"]),
+      "x-bare-forward-headers": JSON.stringify(["Accept-Encoding", "Accept-Language"]),
     },
   });
 
-  if (!res.ok) throw new Error(`Bare server error: ${res.status}`);
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`Bare error ${res.status}: ${errText.slice(0, 300)}`);
+  }
+
   return res.text();
 }
 
@@ -46,7 +52,7 @@ async function start() {
   try {
     results = await searchTMDB(query.trim());
   } catch (e) {
-    alert("Search failed. Check your TMDB API key."); return;
+    alert("Search failed."); return;
   }
 
   if (!results.length) { alert("No results found for: " + query); return; }
@@ -75,22 +81,18 @@ async function start() {
     cinemaUrl = `https://cinemaos.tech/player/${r.id}/${season}/${episode}`;
   }
 
-  // Open about:blank synchronously before any await
   const win = window.open("about:blank", "_blank");
   if (!win) { alert("Please allow popups and try again."); return; }
 
-  // Write loading screen immediately so window stays open
   win.document.open();
   win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"/>
 <style>*{margin:0;padding:0}html,body{width:100%;height:100%;background:#0a0a0a;display:flex;align-items:center;justify-content:center;color:#444;font-family:monospace;font-size:13px}</style>
 </head><body>loading...</body></html>`);
   win.document.close();
 
-  // Fetch CinemaOS page through bare server, write it into the window
   try {
     const html = await fetchViaBare(cinemaUrl);
 
-    // Rewrite root-relative URLs to absolute cinemaos.tech URLs
     const rewritten = html
       .replace(/(href|src)=(["'])\/(?!\/)/g, `$1=$2https://cinemaos.tech/`)
       .replace(/url\(\s*['"]?\//g, `url(https://cinemaos.tech/`);
@@ -99,12 +101,11 @@ async function start() {
     win.document.write(rewritten);
     win.document.close();
 
-    // Inject base tag so any remaining relative links resolve correctly
     try {
       const base = win.document.createElement("base");
       base.href = "https://cinemaos.tech";
       win.document.head.insertBefore(base, win.document.head.firstChild);
-    } catch(e) {}
+    } catch (e) {}
 
   } catch (err) {
     console.error("Bare fetch failed:", err);
