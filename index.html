@@ -48,42 +48,104 @@ async function bareRequest(targetUrl) {
 }
 
 function rewriteHtml(html) {
-  // Rewrite attribute-level relative URLs
   html = html
     .replace(/(src|href)=(["'])\/(?!\/)/g, `$1=$2${CINEMA_BASE}/`)
     .replace(/(src|href)=(["'])\/\//g,      `$1=$2https://`)
     .replace(/url\(\s*['"]?\//g,            `url(${CINEMA_BASE}/`);
 
-  // Interceptor injected before any other script runs — patches fetch and XHR
-  // so relative API calls like "api/providerv3?..." go to cinemaos.tech
+  // This interceptor runs before any cinemaos script.
+  // Any fetch/XHR to cinemaos.tech (or relative URLs resolving there)
+  // gets rerouted through the bare proxy so CORS is never an issue.
   const interceptor = `<script>
 (function(){
-  var BASE="${CINEMA_BASE}";
-  function fix(u){
+  var BARE="${BARE_SERVER}";
+  var CINEMA="${CINEMA_BASE}";
+
+  function fixUrl(u){
     if(!u) return u;
     u=String(u);
-    if(/^https?:\\/\\//.test(u)) return u;
-    if(u.startsWith("//")) return "https:"+u;
-    if(u.startsWith("/")) return BASE+u;
-    return BASE+"/"+u;
+    if(u.startsWith("//")) u="https:"+u;
+    if(!u.startsWith("http")) u=CINEMA+(u.startsWith("/")?u:"/"+u);
+    return u;
   }
-  var _f=window.fetch;
+
+  function viabare(url){
+    try {
+      var u=new URL(url);
+      var port=u.port||(u.protocol==="https:"?"443":"80");
+      var req=new Request(BARE+"/v1/",{
+        method:"GET",
+        headers:{
+          "x-bare-protocol":u.protocol,
+          "x-bare-host":u.hostname,
+          "x-bare-port":port,
+          "x-bare-path":u.pathname+u.search,
+          "x-bare-headers":JSON.stringify({
+            "Host":u.hostname,
+            "User-Agent":"Mozilla/5.0",
+            "Accept":"*/*",
+            "Accept-Language":"en-US,en;q=0.9",
+            "Accept-Encoding":"identity",
+            "Referer":CINEMA,
+          }),
+          "x-bare-forward-headers":JSON.stringify([]),
+        }
+      });
+      return req;
+    } catch(e){ return url; }
+  }
+
+  function shouldProxy(url){
+    try {
+      var u=new URL(url);
+      return u.hostname==="cinemaos.tech";
+    } catch(e){ return false; }
+  }
+
+  var _fetch=window.fetch;
   window.fetch=function(input,init){
-    if(typeof input==="string") input=fix(input);
-    else if(input&&input.url) input=new Request(fix(input.url),input);
-    return _f.call(this,input,init);
+    var url=typeof input==="string"?input:(input&&input.url?input.url:"");
+    url=fixUrl(url);
+    if(shouldProxy(url)){
+      return _fetch.call(this,viabare(url),init).then(function(res){
+        // wrap response so .json() and .text() still work
+        return res;
+      });
+    }
+    if(typeof input==="string") input=url;
+    return _fetch.call(this,input,init);
   };
-  var _o=XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open=function(m,u){
-    arguments[1]=fix(u);
-    return _o.apply(this,arguments);
+
+  var _open=XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open=function(method,url){
+    url=fixUrl(String(url));
+    if(shouldProxy(url)){
+      // For XHR just rewrite to bare — bare returns the response directly
+      var u=new URL(url);
+      var port=u.port||(u.protocol==="https:"?"443":"80");
+      var bareUrl=BARE+"/v1/";
+      _open.call(this,"GET",bareUrl);
+      this.setRequestHeader("x-bare-protocol",u.protocol);
+      this.setRequestHeader("x-bare-host",u.hostname);
+      this.setRequestHeader("x-bare-port",port);
+      this.setRequestHeader("x-bare-path",u.pathname+u.search);
+      this.setRequestHeader("x-bare-headers",JSON.stringify({
+        "Host":u.hostname,
+        "User-Agent":"Mozilla/5.0",
+        "Accept":"*/*",
+        "Accept-Encoding":"identity",
+        "Referer":CINEMA,
+      }));
+      this.setRequestHeader("x-bare-forward-headers",JSON.stringify([]));
+      return;
+    }
+    arguments[1]=url;
+    return _open.apply(this,arguments);
   };
 })();
 <\/script>`;
 
-  // Inject interceptor + base tag right after opening <head>
   html = html.replace(/(<head[^>]*>)/i, `$1<base href="${CINEMA_BASE}/">${interceptor}`);
-
   return html;
 }
 
