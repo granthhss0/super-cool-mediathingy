@@ -67,7 +67,9 @@ function rewriteHtml(html) {
   function isExternal(url){
     try {
       var h=new URL(url).hostname;
-      return h!==new URL(OWN).hostname && h!=="bare-server.fly.dev" && h!=="api.themoviedb.org";
+      return h!==new URL(OWN).hostname
+        && h!=="bare-server.fly.dev"
+        && h!=="api.themoviedb.org";
     } catch(e){ return false; }
   }
 
@@ -100,14 +102,30 @@ function rewriteHtml(html) {
     url=fixUrl(url);
     if(isExternal(url)){
       var bh=makeBareHeaders(url);
-      if(bh) return _fetch.call(this, BARE+"/v1/", {method:"GET", headers:bh});
+      if(bh){
+        // Wrap the bare response so .json() works correctly
+        return _fetch.call(this, BARE+"/v1/", {method:"GET", headers:bh})
+          .then(function(res){
+            // Clone the response but override .json() to handle empty bodies
+            var origJson = res.json.bind(res);
+            var origText = res.text.bind(res);
+            Object.defineProperty(res, 'json', {
+              value: function(){
+                return origText().then(function(t){
+                  if(!t || !t.trim()) throw new SyntaxError("Empty response from proxy");
+                  return JSON.parse(t);
+                });
+              }
+            });
+            return res;
+          });
+      }
     }
     if(typeof input==="string") input=url;
     return _fetch.call(this,input,init);
   };
 
   // --- Patch XHR ---
-  // Store bare headers on the instance, apply them in send()
   var _open   = XMLHttpRequest.prototype.open;
   var _send   = XMLHttpRequest.prototype.send;
   var _setHdr = XMLHttpRequest.prototype.setRequestHeader;
@@ -118,7 +136,6 @@ function rewriteHtml(html) {
       var bh = makeBareHeaders(url);
       if(bh){
         this._bareHeaders = bh;
-        // open to bare server, preserve async flag
         return _open.call(this, "GET", BARE+"/v1/", async!==false, user, pass);
       }
     }
