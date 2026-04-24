@@ -7,159 +7,12 @@
 <body>
 <script>
 const TMDB_API_KEY = "2d1351cf74f73892042699d0431b799a";
-const BARE_SERVER  = "https://bare-server.fly.dev";
 const CINEMA_BASE  = "https://cinemaos.tech";
 
 async function searchTMDB(query) {
   const res  = await fetch(`https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(query)}&include_adult=false`);
   const data = await res.json();
   return (data.results || []).filter(r => r.media_type !== "person").slice(0, 9);
-}
-
-async function bareRequest(targetUrl) {
-  const u    = new URL(targetUrl);
-  const port = parseInt(u.port) || (u.protocol === "https:" ? 443 : 80);
-  const res = await fetch(`${BARE_SERVER}/v1/`, {
-    method: "GET",
-    headers: {
-      "x-bare-protocol":        u.protocol,
-      "x-bare-host":            u.hostname,
-      "x-bare-port":            String(port),
-      "x-bare-path":            u.pathname + u.search,
-      "x-bare-headers":         JSON.stringify({
-        "Host":            u.hostname,
-        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept":          "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "identity",
-        "Referer":         CINEMA_BASE,
-      }),
-      "x-bare-forward-headers": JSON.stringify([]),
-    },
-  });
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    throw new Error(`Bare v1 ${res.status}: ${t.slice(0, 300)}`);
-  }
-  return res.text();
-}
-
-function rewriteHtml(html) {
-  html = html
-    .replace(/(src|href)=(["'])\/(?!\/)/g, `$1=$2${CINEMA_BASE}/`)
-    .replace(/(src|href)=(["'])\/\//g,      `$1=$2https://`)
-    .replace(/url\(\s*['"]?\//g,            `url(${CINEMA_BASE}/`);
-
-  const interceptor = `<script>
-(function(){
-  var BARE="${BARE_SERVER}";
-  var CINEMA="${CINEMA_BASE}";
-  var OWN=location.origin;
-
-  function fixUrl(u){
-    if(!u) return u;
-    u=String(u);
-    if(u.startsWith("//")) u="https:"+u;
-    if(!u.startsWith("http")) u=CINEMA+(u.startsWith("/")?u:"/"+u);
-    return u;
-  }
-
-  function isExternal(url){
-    try {
-      var h=new URL(url).hostname;
-      return h!==new URL(OWN).hostname
-        && h!=="bare-server.fly.dev"
-        && h!=="api.themoviedb.org";
-    } catch(e){ return false; }
-  }
-
-  function makeBareHeaders(url){
-    try {
-      var u=new URL(url);
-      var port=u.port||(u.protocol==="https:"?"443":"80");
-      return {
-        "x-bare-protocol": u.protocol,
-        "x-bare-host":     u.hostname,
-        "x-bare-port":     String(port),
-        "x-bare-path":     u.pathname+u.search,
-        "x-bare-headers":  JSON.stringify({
-          "Host":            u.hostname,
-          "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Accept":          "*/*",
-          "Accept-Encoding": "identity",
-          "Referer":         CINEMA,
-          "Origin":          CINEMA,
-        }),
-        "x-bare-forward-headers": JSON.stringify([]),
-      };
-    } catch(e){ return null; }
-  }
-
-  // --- Patch fetch ---
-  var _fetch=window.fetch;
-  window.fetch=function(input,init){
-    var url=typeof input==="string"?input:(input&&input.url?input.url:"");
-    url=fixUrl(url);
-    if(isExternal(url)){
-      var bh=makeBareHeaders(url);
-      if(bh){
-        // Wrap the bare response so .json() works correctly
-        return _fetch.call(this, BARE+"/v1/", {method:"GET", headers:bh})
-          .then(function(res){
-            // Clone the response but override .json() to handle empty bodies
-            var origJson = res.json.bind(res);
-            var origText = res.text.bind(res);
-            Object.defineProperty(res, 'json', {
-              value: function(){
-                return origText().then(function(t){
-                  if(!t || !t.trim()) throw new SyntaxError("Empty response from proxy");
-                  return JSON.parse(t);
-                });
-              }
-            });
-            return res;
-          });
-      }
-    }
-    if(typeof input==="string") input=url;
-    return _fetch.call(this,input,init);
-  };
-
-  // --- Patch XHR ---
-  var _open   = XMLHttpRequest.prototype.open;
-  var _send   = XMLHttpRequest.prototype.send;
-  var _setHdr = XMLHttpRequest.prototype.setRequestHeader;
-
-  XMLHttpRequest.prototype.open = function(method, url, async, user, pass){
-    url = fixUrl(String(url));
-    if(isExternal(url)){
-      var bh = makeBareHeaders(url);
-      if(bh){
-        this._bareHeaders = bh;
-        return _open.call(this, "GET", BARE+"/v1/", async!==false, user, pass);
-      }
-    }
-    this._bareHeaders = null;
-    return _open.call(this, method, url, async!==false, user, pass);
-  };
-
-  XMLHttpRequest.prototype.send = function(body){
-    if(this._bareHeaders){
-      var self=this;
-      var bh=this._bareHeaders;
-      Object.keys(bh).forEach(function(k){
-        try{ _setHdr.call(self, k, bh[k]); }catch(e){}
-      });
-      return _send.call(this, null);
-    }
-    return _send.call(this, body);
-  };
-
-})();
-<\/script>`;
-
-  html = html.replace(/(<head[^>]*>)/i, `$1<base href="${CINEMA_BASE}/">${interceptor}`);
-  return html;
 }
 
 async function start() {
@@ -199,32 +52,14 @@ async function start() {
     cinemaUrl = `${CINEMA_BASE}/player/${r.id}/${season}/${episode}`;
   }
 
+  // Open about:blank synchronously right after the prompts
   const win = window.open("about:blank", "_blank");
   if (!win) { alert("Please allow popups and try again."); return; }
 
-  win.document.open();
-  win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"/>
-<style>*{margin:0;padding:0}html,body{width:100%;height:100%;background:#0a0a0a;color:#444;font-family:monospace;font-size:13px;display:flex;align-items:center;justify-content:center}</style>
-</head><body>loading...</body></html>`);
-  win.document.close();
-
-  let html;
-  try {
-    html = await bareRequest(cinemaUrl);
-  } catch (e) {
-    win.document.open();
-    win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"/>
-<style>*{margin:0;padding:0}html,body{background:#0a0a0a;color:#555;font-family:monospace;font-size:13px;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;gap:8px}</style>
-</head><body><div>proxy error</div><div style="color:#333;font-size:11px">${e.message}</div></body></html>`);
-    win.document.close();
-    return;
-  }
-
-  const rewritten = rewriteHtml(html);
-
-  win.document.open();
-  win.document.write(rewritten);
-  win.document.close();
+  // Navigate the about:blank tab to CinemaOS — full native page load,
+  // no proxying needed on our end. The tab URL stays as about:blank
+  // momentarily then resolves to the CinemaOS player.
+  win.location.href = cinemaUrl;
 }
 
 window.addEventListener("load", start);
