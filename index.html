@@ -7,7 +7,7 @@
 <body>
 <script>
 const TMDB_API_KEY = "2d1351cf74f73892042699d0431b799a";
-const BARE_SERVER  = "https://bare-server.fly.dev/"; // your bare server
+const BARE_SERVER  = "https://bare-server.fly.dev"; // no trailing slash
 
 async function searchTMDB(query) {
   const res  = await fetch(`https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(query)}&include_adult=false`);
@@ -15,21 +15,26 @@ async function searchTMDB(query) {
   return (data.results || []).filter(r => r.media_type !== "person").slice(0, 9);
 }
 
-// Fetch a URL through the bare server and return response text
+// Fetch a URL through bare server v2 endpoint
 async function fetchViaBare(targetUrl) {
-  // Bare server v2 protocol: POST to bare server with target URL in headers
-  const res = await fetch(BARE_SERVER, {
-    method: "POST",
+  const url = new URL(targetUrl);
+
+  const res = await fetch(`${BARE_SERVER}/v2/`, {
+    method: "GET",
     headers: {
-      "x-bare-url":     targetUrl,
-      "x-bare-headers": JSON.stringify({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "x-bare-url":              targetUrl,
+      "x-bare-headers":          JSON.stringify({
+        "Host":            url.host,
+        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
       }),
-      "x-bare-forward-headers": JSON.stringify(["accept-encoding", "connection"]),
+      "x-bare-forward-headers":  JSON.stringify(["accept-encoding", "connection"]),
+      "x-bare-pass-headers":     JSON.stringify(["content-encoding", "content-length"]),
     },
   });
+
+  if (!res.ok) throw new Error(`Bare server error: ${res.status}`);
   return res.text();
 }
 
@@ -74,42 +79,40 @@ async function start() {
   const win = window.open("about:blank", "_blank");
   if (!win) { alert("Please allow popups and try again."); return; }
 
-  // Write a loading screen immediately so the window stays open
+  // Write loading screen immediately so window stays open
   win.document.open();
   win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"/>
-<style>
-  *{margin:0;padding:0;box-sizing:border-box}
-  html,body{width:100%;height:100%;background:#0a0a0a;overflow:hidden}
-  #msg{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
-       color:#444;font-family:monospace;font-size:13px}
-</style></head><body><div id="msg">loading...</div></body></html>`);
+<style>*{margin:0;padding:0}html,body{width:100%;height:100%;background:#0a0a0a;display:flex;align-items:center;justify-content:center;color:#444;font-family:monospace;font-size:13px}</style>
+</head><body>loading...</body></html>`);
   win.document.close();
 
-  // Now fetch CinemaOS through bare server and write the result into the window
+  // Fetch CinemaOS page through bare server, write it into the window
   try {
     const html = await fetchViaBare(cinemaUrl);
 
-    // Rewrite relative URLs to absolute so assets load correctly
+    // Rewrite root-relative URLs to absolute cinemaos.tech URLs
     const rewritten = html
-      .replace(/(href|src)=["']\//g, `$1="https://cinemaos.tech/`)
-      .replace(/url\(\//g, `url(https://cinemaos.tech/`);
+      .replace(/(href|src)=(["'])\/(?!\/)/g, `$1=$2https://cinemaos.tech/`)
+      .replace(/url\(\s*['"]?\//g, `url(https://cinemaos.tech/`);
 
     win.document.open();
     win.document.write(rewritten);
     win.document.close();
 
-    // Set base URL so relative links inside the page resolve correctly
-    const base = win.document.createElement("base");
-    base.href = "https://cinemaos.tech";
-    win.document.head.prepend(base);
+    // Inject base tag so any remaining relative links resolve correctly
+    try {
+      const base = win.document.createElement("base");
+      base.href = "https://cinemaos.tech";
+      win.document.head.insertBefore(base, win.document.head.firstChild);
+    } catch(e) {}
 
   } catch (err) {
     console.error("Bare fetch failed:", err);
     win.document.open();
     win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"/>
-<style>*{margin:0;padding:0}html,body{background:#0a0a0a;color:#555;font-family:monospace;
-display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:8px}</style>
-</head><body><div>proxy error</div><div style="font-size:11px;color:#333">${err.message}</div></body></html>`);
+<style>*{margin:0;padding:0}html,body{background:#0a0a0a;color:#555;font-family:monospace;font-size:13px;
+display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;gap:8px}</style>
+</head><body><div>proxy error</div><div style="color:#333;font-size:11px">${err.message}</div></body></html>`);
     win.document.close();
   }
 }
