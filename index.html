@@ -8,6 +8,7 @@
 <script>
 const TMDB_API_KEY = "2d1351cf74f73892042699d0431b799a";
 const BARE_SERVER  = "https://bare-server.fly.dev";
+const CINEMA_BASE  = "https://cinemaos.tech";
 
 async function searchTMDB(query) {
   const res  = await fetch(`https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(query)}&include_adult=false`);
@@ -32,6 +33,7 @@ async function bareRequest(targetUrl) {
         "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "identity",
+        "Referer":         CINEMA_BASE,
       }),
       "x-bare-forward-headers": JSON.stringify([]),
     },
@@ -45,11 +47,44 @@ async function bareRequest(targetUrl) {
   return res.text();
 }
 
-function rewriteHtml(html, base) {
-  return html
-    .replace(/(src|href)=(["'])\/(?!\/)/g, `$1=$2${base}/`)
+function rewriteHtml(html) {
+  // Rewrite attribute-level relative URLs
+  html = html
+    .replace(/(src|href)=(["'])\/(?!\/)/g, `$1=$2${CINEMA_BASE}/`)
     .replace(/(src|href)=(["'])\/\//g,      `$1=$2https://`)
-    .replace(/url\(\s*['"]?\//g,            `url(${base}/`);
+    .replace(/url\(\s*['"]?\//g,            `url(${CINEMA_BASE}/`);
+
+  // Interceptor injected before any other script runs — patches fetch and XHR
+  // so relative API calls like "api/providerv3?..." go to cinemaos.tech
+  const interceptor = `<script>
+(function(){
+  var BASE="${CINEMA_BASE}";
+  function fix(u){
+    if(!u) return u;
+    u=String(u);
+    if(/^https?:\\/\\//.test(u)) return u;
+    if(u.startsWith("//")) return "https:"+u;
+    if(u.startsWith("/")) return BASE+u;
+    return BASE+"/"+u;
+  }
+  var _f=window.fetch;
+  window.fetch=function(input,init){
+    if(typeof input==="string") input=fix(input);
+    else if(input&&input.url) input=new Request(fix(input.url),input);
+    return _f.call(this,input,init);
+  };
+  var _o=XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open=function(m,u){
+    arguments[1]=fix(u);
+    return _o.apply(this,arguments);
+  };
+})();
+<\/script>`;
+
+  // Inject interceptor + base tag right after opening <head>
+  html = html.replace(/(<head[^>]*>)/i, `$1<base href="${CINEMA_BASE}/">${interceptor}`);
+
+  return html;
 }
 
 async function start() {
@@ -82,11 +117,11 @@ async function start() {
   let cinemaUrl;
 
   if (r.media_type === "movie") {
-    cinemaUrl = `https://cinemaos.tech/player/${r.id}`;
+    cinemaUrl = `${CINEMA_BASE}/player/${r.id}`;
   } else {
     const season  = prompt("Season number:", "1") || "1";
     const episode = prompt("Episode number:", "1") || "1";
-    cinemaUrl = `https://cinemaos.tech/player/${r.id}/${season}/${episode}`;
+    cinemaUrl = `${CINEMA_BASE}/player/${r.id}/${season}/${episode}`;
   }
 
   const win = window.open("about:blank", "_blank");
@@ -110,20 +145,11 @@ async function start() {
     return;
   }
 
-  const base = "https://cinemaos.tech";
-  const rewritten = rewriteHtml(html, base);
+  const rewritten = rewriteHtml(html);
 
   win.document.open();
   win.document.write(rewritten);
   win.document.close();
-
-  try {
-    const baseEl = win.document.createElement("base");
-    baseEl.href = base;
-    if (win.document.head) {
-      win.document.head.insertBefore(baseEl, win.document.head.firstChild);
-    }
-  } catch (e) {}
 }
 
 window.addEventListener("load", start);
