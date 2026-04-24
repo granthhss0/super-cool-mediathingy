@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Media</title>
+</head>
+<body>
+<script>
+const TMDB_API_KEY = "2d1351cf74f73892042699d0431b799a";
+const BARE_SERVER  = "https://bare-server.fly.dev/"; // your bare server
+
+async function searchTMDB(query) {
+  const res  = await fetch(`https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(query)}&include_adult=false`);
+  const data = await res.json();
+  return (data.results || []).filter(r => r.media_type !== "person").slice(0, 9);
+}
+
+// UV's default XOR codec
+function xorEncode(str) {
+  return encodeURIComponent(
+    Array.from(str).map(c => String.fromCharCode(c.charCodeAt(0) ^ 2)).join("")
+  );
+}
+
+async function start() {
+  const query = prompt("What do you want to watch?");
+  if (!query || !query.trim()) return;
+
+  let results;
+  try {
+    results = await searchTMDB(query.trim());
+  } catch (e) {
+    alert("Search failed. Check your TMDB API key."); return;
+  }
+
+  if (!results.length) { alert("No results found for: " + query); return; }
+
+  const list = results.map((r, i) => {
+    const title = r.title || r.name || "Unknown";
+    const year  = (r.release_date || r.first_air_date || "").slice(0, 4);
+    const type  = r.media_type === "movie" ? "Movie" : "TV";
+    return `[${i + 1}] ${title}${year ? " (" + year + ")" : ""} — ${type}`;
+  }).join("\n");
+
+  const pick = prompt(`Results for "${query}":\n\n${list}\n\nEnter a number:`);
+  if (!pick) return;
+
+  const idx = parseInt(pick, 10) - 1;
+  if (isNaN(idx) || idx < 0 || idx >= results.length) { alert("Invalid selection."); return; }
+
+  const r = results[idx];
+  let cinemaUrl;
+
+  if (r.media_type === "movie") {
+    cinemaUrl = `https://cinemaos.tech/player/${r.id}`;
+  } else {
+    const season  = prompt("Season number:", "1") || "1";
+    const episode = prompt("Episode number:", "1") || "1";
+    cinemaUrl = `https://cinemaos.tech/player/${r.id}/${season}/${episode}`;
+  }
+
+  // Open the window synchronously right here so the browser doesn't block it
+  const win = window.open("about:blank", "_blank");
+  if (!win) { alert("Please allow popups for this site and try again."); return; }
+
+  // The proxied URL: UV encodes cinemaUrl, bare server handls the tunneling
+  const proxiedUrl = "/uv/service/" + xorEncode(cinemaUrl);
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8"/>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
+  iframe { width: 100%; height: 100%; border: none; display: block; }
+  #msg { position: fixed; inset: 0; background: #0a0a0a; color: #555;
+         font-family: monospace; font-size: 13px;
+         display: flex; align-items: center; justify-content: center; }
+</style>
+</head>
+<body>
+<div id="msg">loading...</div>
+<iframe id="frame" allowfullscreen allow="autoplay; fullscreen; encrypted-media; picture-in-picture"></iframe>
+<script>
+(async () => {
+  const BARE       = ${JSON.stringify(BARE_SERVER)};
+  const CINEMA_URL = ${JSON.stringify(cinemaUrl)};
+  const PROXIED    = ${JSON.stringify(proxiedUrl)};
+
+  function xorEncode(str) {
+    return encodeURIComponent(
+      Array.from(str).map(c => String.fromCharCode(c.charCodeAt(0) ^ 2)).join("")
+    );
+  }
+
+  // Fetch UV SW from CDN, patch in config, register as blob SW
+  async function setupUV() {
+    const swText = await fetch(
+      "https://cdn.jsdelivr.net/npm/@titaniumnetwork-dev/ultraviolet@2.2.4/dist/uv.sw.js"
+    ).then(r => r.text());
+
+    const config = \`
+self.__uv$config = {
+  prefix:    "/uv/service/",
+  bare:      "\${BARE}",
+  encodeUrl: (s) => encodeURIComponent(Array.from(s).map(c => String.fromCharCode(c.charCodeAt(0)^2)).join("")),
+  decodeUrl: (s) => decodeURIComponent(Array.from(s).map(c => String.fromCharCode(c.charCodeAt(0)^2)).join("")),
+  handler:   "https://cdn.jsdelivr.net/npm/@titaniumnetwork-dev/ultraviolet@2.2.4/dist/uv.handler.js",
+  bundle:    "https://cdn.jsdelivr.net/npm/@titaniumnetwork-dev/ultraviolet@2.2.4/dist/uv.bundle.js",
+};
+\`;
+
+    const blob  = new Blob([config + swText], { type: "application/javascript" });
+    const swUrl = URL.createObjectURL(blob);
+    await navigator.serviceWorker.register(swUrl, { scope: "/" });
+    await navigator.serviceWorker.ready;
+  }
+
+  try {
+    await setupUV();
+    const frame = document.getElementById("frame");
+    document.getElementById("msg").remove();
+    frame.src = PROXIED;
+  } catch (err) {
+    console.error("Proxy failed:", err);
+    // Fallback: just navigate the tab directly to CinemaOS
+    document.getElementById("msg").textContent = "opening directly...";
+    setTimeout(() => { window.location.href = CINEMA_URL; }, 500);
+  }
+})();
+<\/script>
+</body>
+</html>`;
+
+  win.document.open();
+  win.document.write(html);
+  win.document.close();
+}
+
+window.addEventListener("load", start);
+</script>
+</body>
+</html>
