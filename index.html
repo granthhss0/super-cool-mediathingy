@@ -29,7 +29,7 @@ async function bareRequest(targetUrl) {
       "x-bare-headers":         JSON.stringify({
         "Host":            u.hostname,
         "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept":          "*/*",
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "identity",
         "Referer":         CINEMA_BASE,
@@ -50,8 +50,6 @@ function rewriteHtml(html) {
     .replace(/(src|href)=(["'])\/\//g,      `$1=$2https://`)
     .replace(/url\(\s*['"]?\//g,            `url(${CINEMA_BASE}/`);
 
-  // Intercept ALL fetch and XHR — route everything external through bare.
-  // This covers cinemaos API calls, HLS .m3u8 manifests, CDN streams, etc.
   const interceptor = `<script>
 (function(){
   var BARE="${BARE_SERVER}";
@@ -66,83 +64,80 @@ function rewriteHtml(html) {
     return u;
   }
 
-  function bareHeaders(url, extraHeaders){
+  function isExternal(url){
+    try {
+      var h=new URL(url).hostname;
+      return h!==new URL(OWN).hostname && h!=="bare-server.fly.dev" && h!=="api.themoviedb.org";
+    } catch(e){ return false; }
+  }
+
+  function makeBareHeaders(url){
     try {
       var u=new URL(url);
       var port=u.port||(u.protocol==="https:"?"443":"80");
-      var h={
+      return {
         "x-bare-protocol": u.protocol,
         "x-bare-host":     u.hostname,
-        "x-bare-port":     port,
+        "x-bare-port":     String(port),
         "x-bare-path":     u.pathname+u.search,
-        "x-bare-headers":  JSON.stringify(Object.assign({
+        "x-bare-headers":  JSON.stringify({
           "Host":            u.hostname,
-          "User-Agent":      "Mozilla/5.0",
+          "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
           "Accept":          "*/*",
           "Accept-Encoding": "identity",
           "Referer":         CINEMA,
           "Origin":          CINEMA,
-        }, extraHeaders||{})),
+        }),
         "x-bare-forward-headers": JSON.stringify([]),
       };
-      return h;
     } catch(e){ return null; }
   }
 
-  function isExternal(url){
-    try {
-      var u=new URL(url);
-      // don't proxy calls to the bare server itself or TMDB
-      return u.origin!==OWN && u.hostname!=="bare-server.fly.dev" && u.hostname!=="api.themoviedb.org";
-    } catch(e){ return false; }
-  }
-
-  // Patch fetch
+  // --- Patch fetch ---
   var _fetch=window.fetch;
-  window.fetch=function(input, init){
+  window.fetch=function(input,init){
     var url=typeof input==="string"?input:(input&&input.url?input.url:"");
     url=fixUrl(url);
     if(isExternal(url)){
-      var h=bareHeaders(url);
-      if(h){
-        return _fetch.call(this, BARE+"/v1/", Object.assign({}, init||{}, {method:"GET", headers:h}));
-      }
+      var bh=makeBareHeaders(url);
+      if(bh) return _fetch.call(this, BARE+"/v1/", {method:"GET", headers:bh});
     }
     if(typeof input==="string") input=url;
-    return _fetch.call(this, input, init);
+    return _fetch.call(this,input,init);
   };
 
-  // Patch XHR — covers HLS.js m3u8 and segment requests
-  var _open=XMLHttpRequest.prototype.open;
-  var _setHeader=XMLHttpRequest.prototype.setRequestHeader;
-  var _send=XMLHttpRequest.prototype.send;
+  // --- Patch XHR ---
+  // Store bare headers on the instance, apply them in send()
+  var _open   = XMLHttpRequest.prototype.open;
+  var _send   = XMLHttpRequest.prototype.send;
+  var _setHdr = XMLHttpRequest.prototype.setRequestHeader;
 
-  XMLHttpRequest.prototype.open=function(method, url, async, user, pass){
-    url=fixUrl(String(url));
-    this._origUrl=url;
-    this._proxied=false;
+  XMLHttpRequest.prototype.open = function(method, url, async, user, pass){
+    url = fixUrl(String(url));
     if(isExternal(url)){
-      this._proxied=true;
-      this._bareH=bareHeaders(url);
-      if(this._bareH){
+      var bh = makeBareHeaders(url);
+      if(bh){
+        this._bareHeaders = bh;
+        // open to bare server, preserve async flag
         return _open.call(this, "GET", BARE+"/v1/", async!==false, user, pass);
       }
     }
-    this._origUrl=url;
+    this._bareHeaders = null;
     return _open.call(this, method, url, async!==false, user, pass);
   };
 
-  XMLHttpRequest.prototype.send=function(body){
-    if(this._proxied && this._bareH){
+  XMLHttpRequest.prototype.send = function(body){
+    if(this._bareHeaders){
       var self=this;
-      var h=this._bareH;
-      Object.keys(h).forEach(function(k){
-        try { _setHeader.call(self, k, h[k]); } catch(e){}
+      var bh=this._bareHeaders;
+      Object.keys(bh).forEach(function(k){
+        try{ _setHdr.call(self, k, bh[k]); }catch(e){}
       });
       return _send.call(this, null);
     }
     return _send.call(this, body);
   };
+
 })();
 <\/script>`;
 
