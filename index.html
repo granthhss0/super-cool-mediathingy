@@ -19,7 +19,6 @@ async function searchTMDB(query) {
 async function bareRequest(targetUrl) {
   const u    = new URL(targetUrl);
   const port = parseInt(u.port) || (u.protocol === "https:" ? 443 : 80);
-
   const res = await fetch(`${BARE_SERVER}/v1/`, {
     method: "GET",
     headers: {
@@ -38,12 +37,10 @@ async function bareRequest(targetUrl) {
       "x-bare-forward-headers": JSON.stringify([]),
     },
   });
-
   if (!res.ok) {
     const t = await res.text().catch(() => "");
     throw new Error(`Bare v1 ${res.status}: ${t.slice(0, 300)}`);
   }
-
   return res.text();
 }
 
@@ -53,13 +50,13 @@ function rewriteHtml(html) {
     .replace(/(src|href)=(["'])\/\//g,      `$1=$2https://`)
     .replace(/url\(\s*['"]?\//g,            `url(${CINEMA_BASE}/`);
 
-  // This interceptor runs before any cinemaos script.
-  // Any fetch/XHR to cinemaos.tech (or relative URLs resolving there)
-  // gets rerouted through the bare proxy so CORS is never an issue.
+  // Intercept ALL fetch and XHR — route everything external through bare.
+  // This covers cinemaos API calls, HLS .m3u8 manifests, CDN streams, etc.
   const interceptor = `<script>
 (function(){
   var BARE="${BARE_SERVER}";
   var CINEMA="${CINEMA_BASE}";
+  var OWN=location.origin;
 
   function fixUrl(u){
     if(!u) return u;
@@ -69,78 +66,82 @@ function rewriteHtml(html) {
     return u;
   }
 
-  function viabare(url){
+  function bareHeaders(url, extraHeaders){
     try {
       var u=new URL(url);
       var port=u.port||(u.protocol==="https:"?"443":"80");
-      var req=new Request(BARE+"/v1/",{
-        method:"GET",
-        headers:{
-          "x-bare-protocol":u.protocol,
-          "x-bare-host":u.hostname,
-          "x-bare-port":port,
-          "x-bare-path":u.pathname+u.search,
-          "x-bare-headers":JSON.stringify({
-            "Host":u.hostname,
-            "User-Agent":"Mozilla/5.0",
-            "Accept":"*/*",
-            "Accept-Language":"en-US,en;q=0.9",
-            "Accept-Encoding":"identity",
-            "Referer":CINEMA,
-          }),
-          "x-bare-forward-headers":JSON.stringify([]),
-        }
-      });
-      return req;
-    } catch(e){ return url; }
+      var h={
+        "x-bare-protocol": u.protocol,
+        "x-bare-host":     u.hostname,
+        "x-bare-port":     port,
+        "x-bare-path":     u.pathname+u.search,
+        "x-bare-headers":  JSON.stringify(Object.assign({
+          "Host":            u.hostname,
+          "User-Agent":      "Mozilla/5.0",
+          "Accept":          "*/*",
+          "Accept-Encoding": "identity",
+          "Referer":         CINEMA,
+          "Origin":          CINEMA,
+        }, extraHeaders||{})),
+        "x-bare-forward-headers": JSON.stringify([]),
+      };
+      return h;
+    } catch(e){ return null; }
   }
 
-  function shouldProxy(url){
+  function isExternal(url){
     try {
       var u=new URL(url);
-      return u.hostname==="cinemaos.tech";
+      // don't proxy calls to the bare server itself or TMDB
+      return u.origin!==OWN && u.hostname!=="bare-server.fly.dev" && u.hostname!=="api.themoviedb.org";
     } catch(e){ return false; }
   }
 
+  // Patch fetch
   var _fetch=window.fetch;
-  window.fetch=function(input,init){
+  window.fetch=function(input, init){
     var url=typeof input==="string"?input:(input&&input.url?input.url:"");
     url=fixUrl(url);
-    if(shouldProxy(url)){
-      return _fetch.call(this,viabare(url),init).then(function(res){
-        // wrap response so .json() and .text() still work
-        return res;
-      });
+    if(isExternal(url)){
+      var h=bareHeaders(url);
+      if(h){
+        return _fetch.call(this, BARE+"/v1/", Object.assign({}, init||{}, {method:"GET", headers:h}));
+      }
     }
     if(typeof input==="string") input=url;
-    return _fetch.call(this,input,init);
+    return _fetch.call(this, input, init);
   };
 
+  // Patch XHR — covers HLS.js m3u8 and segment requests
   var _open=XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open=function(method,url){
+  var _setHeader=XMLHttpRequest.prototype.setRequestHeader;
+  var _send=XMLHttpRequest.prototype.send;
+
+  XMLHttpRequest.prototype.open=function(method, url, async, user, pass){
     url=fixUrl(String(url));
-    if(shouldProxy(url)){
-      // For XHR just rewrite to bare — bare returns the response directly
-      var u=new URL(url);
-      var port=u.port||(u.protocol==="https:"?"443":"80");
-      var bareUrl=BARE+"/v1/";
-      _open.call(this,"GET",bareUrl);
-      this.setRequestHeader("x-bare-protocol",u.protocol);
-      this.setRequestHeader("x-bare-host",u.hostname);
-      this.setRequestHeader("x-bare-port",port);
-      this.setRequestHeader("x-bare-path",u.pathname+u.search);
-      this.setRequestHeader("x-bare-headers",JSON.stringify({
-        "Host":u.hostname,
-        "User-Agent":"Mozilla/5.0",
-        "Accept":"*/*",
-        "Accept-Encoding":"identity",
-        "Referer":CINEMA,
-      }));
-      this.setRequestHeader("x-bare-forward-headers",JSON.stringify([]));
-      return;
+    this._origUrl=url;
+    this._proxied=false;
+    if(isExternal(url)){
+      this._proxied=true;
+      this._bareH=bareHeaders(url);
+      if(this._bareH){
+        return _open.call(this, "GET", BARE+"/v1/", async!==false, user, pass);
+      }
     }
-    arguments[1]=url;
-    return _open.apply(this,arguments);
+    this._origUrl=url;
+    return _open.call(this, method, url, async!==false, user, pass);
+  };
+
+  XMLHttpRequest.prototype.send=function(body){
+    if(this._proxied && this._bareH){
+      var self=this;
+      var h=this._bareH;
+      Object.keys(h).forEach(function(k){
+        try { _setHeader.call(self, k, h[k]); } catch(e){}
+      });
+      return _send.call(this, null);
+    }
+    return _send.call(this, body);
   };
 })();
 <\/script>`;
