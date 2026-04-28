@@ -8,6 +8,7 @@
 <script>
 const TMDB_API_KEY = "2d1351cf74f73892042699d0431b799a";
 const BARE_SERVER  = "https://bare-server.fly.dev";
+const PROXY        = "https://bare-server.fly.dev/proxy?url=";
 const CINEMA_BASE  = "https://cinemaos.tech";
 
 async function searchTMDB(query) {
@@ -50,9 +51,11 @@ function rewriteHtml(html) {
     .replace(/(src|href)=(["'])\/\//g,      `$1=$2https://`)
     .replace(/url\(\s*['"]?\//g,            `url(${CINEMA_BASE}/`);
 
+  // Intercept all fetch + XHR by routing through /proxy?url=
+  // This is simpler and more reliable than bare protocol for XHR/HLS
   const interceptor = `<script>
 (function(){
-  var BARE="${BARE_SERVER}";
+  var PROXY="${PROXY}";
   var CINEMA="${CINEMA_BASE}";
   var OWN=location.origin;
 
@@ -73,27 +76,7 @@ function rewriteHtml(html) {
     } catch(e){ return false; }
   }
 
-  function makeBareHeaders(url){
-    try {
-      var u=new URL(url);
-      var port=u.port||(u.protocol==="https:"?"443":"80");
-      return {
-        "x-bare-protocol": u.protocol,
-        "x-bare-host":     u.hostname,
-        "x-bare-port":     String(port),
-        "x-bare-path":     u.pathname+u.search,
-        "x-bare-headers":  JSON.stringify({
-          "Host":            u.hostname,
-          "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Accept":          "*/*",
-          "Accept-Encoding": "identity",
-          "Referer":         CINEMA,
-          "Origin":          CINEMA,
-        }),
-        "x-bare-forward-headers": JSON.stringify([]),
-      };
-    } catch(e){ return null; }
-  }
+  function proxyUrl(url){ return PROXY+encodeURIComponent(url); }
 
   // --- Patch fetch ---
   var _fetch=window.fetch;
@@ -101,66 +84,32 @@ function rewriteHtml(html) {
     var url=typeof input==="string"?input:(input&&input.url?input.url:"");
     url=fixUrl(url);
     if(isExternal(url)){
-      var bh=makeBareHeaders(url);
-      if(bh){
-        return _fetch.call(this, BARE+"/v1/", {method:"GET", headers:bh})
-          .then(function(res){
-            var origText=res.text.bind(res);
-            Object.defineProperty(res,"json",{value:function(){
-              return origText().then(function(t){
-                if(!t||!t.trim()) throw new SyntaxError("Empty proxy response");
-                return JSON.parse(t);
-              });
-            }});
-            return res;
-          });
-      }
+      return _fetch.call(this, proxyUrl(url), init)
+        .then(function(res){
+          var origText=res.text.bind(res);
+          Object.defineProperty(res,"json",{value:function(){
+            return origText().then(function(t){
+              if(!t||!t.trim()) throw new SyntaxError("Empty proxy response");
+              return JSON.parse(t);
+            });
+          }});
+          return res;
+        });
     }
     if(typeof input==="string") input=url;
     return _fetch.call(this,input,init);
   };
 
   // --- Patch XHR ---
-  var _open   = XMLHttpRequest.prototype.open;
-  var _send   = XMLHttpRequest.prototype.send;
-  var _setHdr = XMLHttpRequest.prototype.setRequestHeader;
+  var _open = XMLHttpRequest.prototype.open;
 
   XMLHttpRequest.prototype.open = function(method, url, async, user, pass){
     url = fixUrl(String(url));
     if(isExternal(url)){
-      var bh = makeBareHeaders(url);
-      if(bh){
-        this._bareHeaders = bh;
-        this._isProxied = true;
-        return _open.call(this, "GET", BARE+"/v1/", async!==false, user, pass);
-      }
+      // Route through simple /proxy?url= — no special headers needed
+      return _open.call(this, "GET", proxyUrl(url), async!==false, user, pass);
     }
-    this._bareHeaders = null;
-    this._isProxied = false;
     return _open.call(this, method, url, async!==false, user, pass);
-  };
-
-  // Block HLS.js from setting its own headers on proxied requests
-  // (it would set things like "Accept" which conflict with bare protocol)
-  XMLHttpRequest.prototype.setRequestHeader = function(name, value){
-    if(this._isProxied){
-      // Only allow bare headers through, block everything else
-      if(name.startsWith("x-bare-")) return _setHdr.call(this, name, value);
-      return; // silently drop
-    }
-    return _setHdr.call(this, name, value);
-  };
-
-  XMLHttpRequest.prototype.send = function(body){
-    if(this._isProxied && this._bareHeaders){
-      var self=this;
-      var bh=this._bareHeaders;
-      Object.keys(bh).forEach(function(k){
-        try{ _setHdr.call(self, k, bh[k]); }catch(e){}
-      });
-      return _send.call(this, null);
-    }
-    return _send.call(this, body);
   };
 
 })();
