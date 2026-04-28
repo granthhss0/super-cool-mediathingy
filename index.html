@@ -8,7 +8,7 @@
 <script>
 const TMDB_API_KEY = "2d1351cf74f73892042699d0431b799a";
 const BARE_SERVER  = "https://bare-server.fly.dev";
-const PROXY        = "https://bare-server.fly.dev/proxy?url=";
+const PROXY_BASE   = "https://bare-server.fly.dev/proxy";
 const CINEMA_BASE  = "https://cinemaos.tech";
 
 async function searchTMDB(query) {
@@ -53,7 +53,7 @@ function rewriteHtml(html) {
 
   const interceptor = `<script>
 (function(){
-  var PROXY="${PROXY}";
+  var PROXY_BASE="${PROXY_BASE}";
   var CINEMA="${CINEMA_BASE}";
   var OWN=location.origin;
 
@@ -74,7 +74,20 @@ function rewriteHtml(html) {
     } catch(e){ return false; }
   }
 
-  function proxyUrl(url){ return PROXY+encodeURIComponent(url); }
+  // Build proxy URL, extracting any referer param from the target URL
+  // so CDNs that check Referer (like cdn.1shows.app) get the right value
+  function proxyUrl(url){
+    try {
+      var u = new URL(url);
+      // Some URLs carry a referer param — extract it and pass to proxy
+      var ref = u.searchParams.get("referer") || u.searchParams.get("ref") || "";
+      var p = PROXY_BASE + "?url=" + encodeURIComponent(url);
+      if(ref) p += "&referer=" + encodeURIComponent(ref);
+      return p;
+    } catch(e){
+      return PROXY_BASE + "?url=" + encodeURIComponent(url);
+    }
+  }
 
   // Patch fetch
   var _fetch=window.fetch;
