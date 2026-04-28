@@ -7,7 +7,7 @@
 <body>
 <script>
 const TMDB_API_KEY = "2d1351cf74f73892042699d0431b799a";
-const BARE_SERVER  = "https://bare-server.fly.dev";
+const BARE_SERVER  = "https://bare-server.fly.dev/bare";
 const PROXY        = "https://bare-server.fly.dev/proxy?url=";
 const CINEMA_BASE  = "https://cinemaos.tech";
 
@@ -51,8 +51,6 @@ function rewriteHtml(html) {
     .replace(/(src|href)=(["'])\/\//g,      `$1=$2https://`)
     .replace(/url\(\s*['"]?\//g,            `url(${CINEMA_BASE}/`);
 
-  // Intercept all fetch + XHR by routing through /proxy?url=
-  // This is simpler and more reliable than bare protocol for XHR/HLS
   const interceptor = `<script>
 (function(){
   var PROXY="${PROXY}";
@@ -78,13 +76,16 @@ function rewriteHtml(html) {
 
   function proxyUrl(url){ return PROXY+encodeURIComponent(url); }
 
-  // --- Patch fetch ---
+  // Patch fetch
   var _fetch=window.fetch;
   window.fetch=function(input,init){
     var url=typeof input==="string"?input:(input&&input.url?input.url:"");
     url=fixUrl(url);
     if(isExternal(url)){
-      return _fetch.call(this, proxyUrl(url), init)
+      // Keep original method and body for POST requests (analytics etc)
+      var method=(init&&init.method)||"GET";
+      var body=(init&&init.body)||null;
+      return _fetch.call(this, proxyUrl(url), {method:method, body:body})
         .then(function(res){
           var origText=res.text.bind(res);
           Object.defineProperty(res,"json",{value:function(){
@@ -100,13 +101,11 @@ function rewriteHtml(html) {
     return _fetch.call(this,input,init);
   };
 
-  // --- Patch XHR ---
+  // Patch XHR
   var _open = XMLHttpRequest.prototype.open;
-
   XMLHttpRequest.prototype.open = function(method, url, async, user, pass){
     url = fixUrl(String(url));
     if(isExternal(url)){
-      // Route through simple /proxy?url= — no special headers needed
       return _open.call(this, "GET", proxyUrl(url), async!==false, user, pass);
     }
     return _open.call(this, method, url, async!==false, user, pass);
@@ -178,7 +177,6 @@ async function start() {
   }
 
   const rewritten = rewriteHtml(html);
-
   win.document.open();
   win.document.write(rewritten);
   win.document.close();
