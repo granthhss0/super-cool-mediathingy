@@ -103,20 +103,15 @@ function rewriteHtml(html) {
     if(isExternal(url)){
       var bh=makeBareHeaders(url);
       if(bh){
-        // Wrap the bare response so .json() works correctly
         return _fetch.call(this, BARE+"/v1/", {method:"GET", headers:bh})
           .then(function(res){
-            // Clone the response but override .json() to handle empty bodies
-            var origJson = res.json.bind(res);
-            var origText = res.text.bind(res);
-            Object.defineProperty(res, 'json', {
-              value: function(){
-                return origText().then(function(t){
-                  if(!t || !t.trim()) throw new SyntaxError("Empty response from proxy");
-                  return JSON.parse(t);
-                });
-              }
-            });
+            var origText=res.text.bind(res);
+            Object.defineProperty(res,"json",{value:function(){
+              return origText().then(function(t){
+                if(!t||!t.trim()) throw new SyntaxError("Empty proxy response");
+                return JSON.parse(t);
+              });
+            }});
             return res;
           });
       }
@@ -136,15 +131,28 @@ function rewriteHtml(html) {
       var bh = makeBareHeaders(url);
       if(bh){
         this._bareHeaders = bh;
+        this._isProxied = true;
         return _open.call(this, "GET", BARE+"/v1/", async!==false, user, pass);
       }
     }
     this._bareHeaders = null;
+    this._isProxied = false;
     return _open.call(this, method, url, async!==false, user, pass);
   };
 
+  // Block HLS.js from setting its own headers on proxied requests
+  // (it would set things like "Accept" which conflict with bare protocol)
+  XMLHttpRequest.prototype.setRequestHeader = function(name, value){
+    if(this._isProxied){
+      // Only allow bare headers through, block everything else
+      if(name.startsWith("x-bare-")) return _setHdr.call(this, name, value);
+      return; // silently drop
+    }
+    return _setHdr.call(this, name, value);
+  };
+
   XMLHttpRequest.prototype.send = function(body){
-    if(this._bareHeaders){
+    if(this._isProxied && this._bareHeaders){
       var self=this;
       var bh=this._bareHeaders;
       Object.keys(bh).forEach(function(k){
